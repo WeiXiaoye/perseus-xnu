@@ -83,8 +83,23 @@ fastboot boot boot-perseus-*.img
 | `device/` | `perseus.conf`（设备 profile）与 `perseus.platform.c`（loader 的 SoC 描述） |
 | `docs/` | 调试记录（见下） |
 
-构建方式：先按 HackiOS 的方式准备 `xnu-8796.121.2` 源码树（`xnu/apply.sh`），再依次应用
-`xnu/patches/*.patch`、把 `xnu/files/` 覆盖进树里，然后 `xnu-build.sh`。
+## 怎么编
+
+本仓库**只有补丁和新文件**，不能单独编译——还需要 HackiOS 的基线树和一套 Linux 工具链
+（clang/lld + theos 的 `iPhoneOS16.5.sdk`，不需要 macOS）。
+
+```sh
+git clone https://github.com/oosexgang/hackios-xnu-kernel.git
+export HACKIOS=$PWD/hackios-xnu-kernel THEOS=$HOME/theos
+sh perseus-xnu/scripts/build.sh                  # 内核
+BUILD_LOADER=1 sh perseus-xnu/scripts/build.sh   # 内核 + loader.efi
+```
+
+脚本会校验基线指纹、跑 `xnu/apply.sh`、应用三个补丁、覆盖新文件、装依赖再编译。
+完整步骤、基线版本与排错见 **[docs/BUILD.md](docs/BUILD.md)**。
+
+内核与 loader 的编译产物、iOS 系统卷、厂商固件都**不在**本仓库：前者自行编译，
+后者（IPSW、`a630_*` 固件等）必须由使用者自己从官方渠道或自己的设备获取。
 
 ---
 
