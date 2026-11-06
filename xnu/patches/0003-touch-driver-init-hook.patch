@@ -1,0 +1,18 @@
+--- a/bsd/dev/redwood_input.c	2026-11-06 15:58:20.006072290 +0800
++++ b/bsd/dev/redwood_input.c	2026-11-06 15:58:20.007835233 +0800
+@@ -26,6 +26,7 @@
+ static uint32_t touch_lat = 2;          /* 2: not yet looked up */
+ 
+ extern void loader_log_line(const char *line);
++extern void mi8_fts_init(void);   /* boot-arg fts=1: the ST FTS touch screen (perseus_fts.c) */
+ 
+ /*
+  * A "tl:" line, for the kernel's drivers: into the loader's log as it is written -- the kernel's own
+@@ -218,6 +219,7 @@
+ 	redwood_virtio_input_init();
+ 	redwood_goodix_init();
+ 	redwood_buttons_init();
++	mi8_fts_init();
+ 	redwood_battery_init();
+ 	redwood_ufs_init();
+ 	redwood_net_init();

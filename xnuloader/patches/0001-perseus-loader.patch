@@ -1,0 +1,163 @@
+--- a/xnuloader/loader.c	2026-11-06 15:58:20.060725023 +0800
++++ b/xnuloader/loader.c	2026-11-06 15:58:20.062468866 +0800
+@@ -322,11 +322,14 @@
+ 	staged_len = n;
+ }
+ 
++
+ static int hc_list_is_uefis(void);
+ static int hc_log_skips;                /* logs not written this run (said twice at most) */
+ static void hc_print_state(const char *when);
+ static void hc_take_back(const char *when);
+ 
++static void write_staged(efi_block_io *bio);
++
+ static void
+ write_logs(const char *klog, uint64_t klog_len)
+ {
+@@ -362,6 +365,13 @@
+ 		}
+ 		return;
+ 	}
++	write_staged(bio);
++}
++
++/* Write whatever compose_logs()/compose_live_log() staged. */
++static void
++write_staged(efi_block_io *bio)
++{
+ 	uint64_t bs = bio->media->block_size;
+ 	uint64_t len = (staged_len + 1 + bs - 1) / bs * bs;
+ 	efi_status ws, rs = 0;
+@@ -373,7 +383,6 @@
+ 			hc_print_state("log not written");
+ 			print("log: NOT WRITTEN to logdump: UEFI's transfer list is not the one in the controller\n");
+ 		}
+-		compose_logs(klog, klog_len);
+ 		return;
+ 	}
+ 	ws = bio->write_blocks(bio, bio->media->media_id, 0, len, out_buf);
+@@ -392,7 +401,6 @@
+ 	}
+ 	print("log: %d bytes written to logdump (%x), read back %s (%x)\n", len, ws,
+ 	    EFI_ERROR(ws) ? "not tried" : same ? "the same" : "DIFFERENT", rs);
+-	compose_logs(klog, klog_len);
+ }
+ 
+ static void
+@@ -401,6 +409,7 @@
+ 	write_logs(NULL, 0);
+ }
+ 
++
+ /* ------------------------------------------------------------------------ */
+ /* Apple device tree writer                                                 */
+ /*                                                                          */
+@@ -978,7 +987,7 @@
+ #define OTHER_CPU_NOT_STARTED   1000    /* run_on_other_cpu(): the firmware said yes but the core never arrived */
+ #define OTHER_CPU_HUNG          1001    /* ... the kernel stopped giving signs of life */
+ #define START_SECONDS           5
+-#define SILENCE_SECONDS         50
++#define SILENCE_SECONDS         15
+ #define NOTE_SECONDS            24      /* how long the kernel's progress is written down as it happens */
+ 
+ static void wdt_pet(void);
+@@ -1073,6 +1082,26 @@
+ 	staged_len = n;
+ }
+ 
++/*
++ * The same, with the kernel's log as it stands: what a session that ends with a manual reboot
++ * must leave behind. (Until now only the loader's own log went out during a run.)
++ */
++static void
++flush_log_live(const struct kernel_live *live, uint64_t slide)
++{
++	efi_block_io *bio;
++
++	if (live == NULL) {
++		flush_log();
++		return;
++	}
++	compose_live_log(live, slide);
++	bio = find_log_partition();
++	if (bio != NULL) {
++		write_staged(bio);
++	}
++}
++
+ static void print(const char *fmt, ...);
+ static void flush_log(void);
+ static void put_char(char c);
+@@ -2335,7 +2364,7 @@
+ 				} else {
+ 					note_kernel_progress(live, slide, noted);
+ 				}
+-				flush_log();
++				flush_log_live(live, slide);
+ 			}
+ 		}
+ 		/*
+@@ -2532,6 +2561,8 @@
+ 	const uint8_t *kernel;
+ 	const uint8_t *ramdisk;
+ 	uint32_t ramdisk_size;
++	const uint8_t *ramdisk1;        /* a second disk in the payload, placed at the resident address: md0 */
++	uint32_t ramdisk1_size;
+ 	const char *cmdline;
+ 	uint64_t checkpoint;
+ 	uint64_t forced_base;
+@@ -2577,6 +2608,9 @@
+ 		if (str_eq(e->name, "ramdisk")) {
+ 			pi->ramdisk = p + sizeof(*e);             /* becomes /dev/md0, the root device */
+ 			pi->ramdisk_size = e->size;
++		} else if (str_eq(e->name, "ramdisk1")) {
++			pi->ramdisk1 = p + sizeof(*e);            /* becomes /dev/md0: the boot volume */
++			pi->ramdisk1_size = e->size;
+ 		} else if (str_eq(e->name, "kernel")) {
+ 			pi->kernel = p + sizeof(*e);
+ 		} else if (str_eq(e->name, "cmdline")) {
+@@ -2829,6 +2863,20 @@
+ 	if (pi.resident_rd != 0) {
+ 		resident_rd_size = pi.resident_rd;
+ 	}
++	if (pi.ramdisk1_size != 0) {
++		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;
++		uint64_t res_size = (pi.ramdisk1_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
++
++		if (res_pa + res_size > win_base + win_size || res_pa < kern_hi + rd_size) {
++			print("the second ramdisk does not fit the window\n");
++			return 0;
++		}
++		memset((void *)res_pa, 0, res_size);
++		memcpy((void *)res_pa, pi.ramdisk1, pi.ramdisk1_size);
++		resident_rd_size = pi.ramdisk1_size;
++		print("second ramdisk at pa %x size %x (md0); the payload ramdisk is md1\n",
++		    res_pa, res_size);
++	}
+ 	if (resident_rd_size != 0) {
+ 		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;
+ 		uint64_t res_size = (resident_rd_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+@@ -2961,7 +3009,7 @@
+ 
+ 	/* --- boot_args ------------------------------------------------------ */
+ 	struct boot_args *ba = (struct boot_args *)ba_pa;
+-	memset(ba, 0, sizeof(*ba));
++	memset(ba, 0, sizeof(*ba));   /* the memory is the last run's: nothing may be inherited */
+ 	ba->revision = 2;
+ 	ba->version = 2;
+ 	ba->virtBase = KERNEL_VIRT_BASE;
+@@ -3056,6 +3104,13 @@
+ 	for (const char *c = pi.cmdline; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+ 		ba->commandLine[n++] = *c;
+ 	}
++	/*
++	 * Terminate it. boot_args sits at the same physical address every run and is not zeroed:
++	 * without this the kernel reads on into the last run's arguments (a shorter command line
++	 * left "fts_steps=6" behind a new "fts_steps=3" and the old one won).
++	 */
++	ba->commandLine[n < BOOT_LINE_LENGTH ? n : BOOT_LINE_LENGTH - 1] = 0;
++	print("boot args: %s\n", (const char *)ba->commandLine);
+ 
+ 	/* --- device tree ---------------------------------------------------- */
+ 	const struct platform *plat = PLAT;

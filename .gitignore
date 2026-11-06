@@ -1,0 +1,18 @@
+# 构建产物
+out/
+work/
+*.img
+*.bin
+*.apfs
+*.dylib
+*.o
+*.dSYM/
+BUILD/
+
+# 日志
+logs/
+*.log
+
+# 本机配置
+local/
+*.local

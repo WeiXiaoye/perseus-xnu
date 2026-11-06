@@ -1,0 +1,10 @@
+--- a/bsd/conf/files	2026-11-06 15:58:19.963317572 +0800
++++ b/bsd/conf/files	2026-11-06 15:58:19.968206314 +0800
+@@ -112,6 +112,7 @@
+ bsd/dev/redwood_input.c		standard
+ bsd/dev/redwood_virtio_input.c	standard
+ bsd/dev/redwood_goodix.c	standard
++bsd/dev/perseus_fts.c	standard
+ bsd/dev/redwood_buttons.c	standard
+ bsd/dev/redwood_battery.c	standard
+ bsd/dev/redwood_ufs.c	standard

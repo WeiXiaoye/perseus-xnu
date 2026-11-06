@@ -1,0 +1,71 @@
+--- a/osfmk/arm64/gic_v3_irq.c	2026-11-06 15:58:19.917596750 +0800
++++ b/osfmk/arm64/gic_v3_irq.c	2026-11-06 15:58:19.920805846 +0800
+@@ -78,6 +78,7 @@
+ #define GIC_SPI_MOST            48          /* attached at a time */
+ #define GIC_PRIORITY_DEFAULT    0xa0
+ 
++static uint32_t    gic_timer_intid = GIC_INTID_VTIMER;  /* boot-arg gic_timer_irq=N */
+ static vm_offset_t gicd_base, gicr_base;
+ static vm_size_t   gicr_size;
+ static vm_offset_t gicr_cpu_base[MAX_CPUS]; /* each processor's redistributor frame */
+@@ -310,7 +311,7 @@
+ 		}
+ 		gic_active_iar[cpu] = iar | GIC_IAR_TAKEN;
+ 
+-		if (intid == GIC_INTID_VTIMER) {
++		if (intid == gic_timer_intid) {
+ 			/* same sequence as the FIQ path in sleh_fiq() */
+ 			getCpuDatap()->cpu_decrementer = -1; /* Large */
+ 			rtclock_intr(TRUE);
+@@ -418,7 +419,7 @@
+ {
+ 	int cpu = cpu_number();
+ 	vm_offset_t gicr;
+-	uint32_t mine = 1u << GIC_INTID_VTIMER;
++	uint32_t mine;
+ 
+ 	if (gicd_base == 0) {
+ 		DTEntry entry;
+@@ -440,10 +441,24 @@
+ 		if (gicd_base == 0 || gicr_base == 0) {
+ 			panic("gic: cannot map the distributor/redistributor");
+ 		}
++		/*
++		 * boot-arg gic_timer_irq=N: the INTID of the EL1 virtual timer's PPI. The number is
++		 * architectural (PPI 11, INTID 27) but the firmware of some Qualcomm SoCs, SDM845 and
++		 * SM8150 among them, routes it on PPI 3 (INTID 19); a kernel that listens on the wrong
++		 * one gets no tick at all -- no preemption, no timeouts, and loader_return_after never
++		 * fires. The device profile gives it where it differs.
++		 */
++		uint32_t timer_irq = 0;
++		if (PE_parse_boot_argn("gic_timer_irq", &timer_irq, sizeof(timer_irq)) &&
++		    timer_irq >= 16 && timer_irq < GIC_INTID_SPURIOUS_MIN) {
++			gic_timer_intid = timer_irq;
++		}
+ 	} else if (gicr_cpu_base[cpu] != 0) {
+ 		return;
+ 	}
+ 
++	mine = 1u << gic_timer_intid;
++
+ 	/* System-register CPU interface */
+ 	__builtin_arm_wsr64("ICC_SRE_EL1", __builtin_arm_rsr64("ICC_SRE_EL1") | 1);
+ 	__builtin_arm_isb(ISB_SY);
+@@ -476,7 +491,7 @@
+ 	/* Virtual timer PPI (and those): Group 1 (IRQ), default priority, enabled */
+ 	gic_write32(gicr + GICR_IGROUPR0, gic_read32(gicr + GICR_IGROUPR0) | mine);
+ 	gic_write32(gicr + GICR_IGRPMODR0, gic_read32(gicr + GICR_IGRPMODR0) & ~mine);
+-	*(volatile uint8_t *)(gicr + GICR_IPRIORITYR(GIC_INTID_VTIMER)) = GIC_PRIORITY_DEFAULT;
++	*(volatile uint8_t *)(gicr + GICR_IPRIORITYR(gic_timer_intid)) = GIC_PRIORITY_DEFAULT;
+ 	gic_write32(gicr + GICR_ISENABLER0, mine);
+ 
+ 	/* Distributor: affinity routing, Group 1 enabled (normally already so) */
+@@ -502,7 +517,7 @@
+ 
+ 	ml_install_interrupt_handler(NULL, 0, NULL, gic_irq_handler, NULL);
+ 	kprintf("gic: v3, distributor %p, cpu %d's redistributor %p, virtual timer on PPI %d\n",
+-	    (void *)gicd_base, cpu, (void *)gicr, GIC_INTID_VTIMER);
++	    (void *)gicd_base, cpu, (void *)gicr, gic_timer_intid);
+ }
+ 
+ #endif /* GENERIC_GIC_V3_IRQ */
