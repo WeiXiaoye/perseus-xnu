@@ -69,6 +69,13 @@ static struct touch_page touch_shared __attribute__((aligned(4096)));
 static int touch_ready;
 
 
+static uint32_t touch_int_level(void)
+{
+	uint32_t value = 1;
+
+	touch_tlmm->gpio_in(TOUCH_GPIO_CFG(TOUCH_PIN_INT, 0, T_INPUT, T_PULLUP, 0), &value);
+	return value & 1;
+}
 static void touch_us_delay(uint32_t us)
 {
 	uint64_t freq = READ_SYSREG(CNTFRQ_EL0), start = READ_SYSREG(CNTVCT_EL0);
@@ -502,6 +509,15 @@ static void touch_poll(void)
 	uint64_t now = READ_SYSREG(CNTVCT_EL0);
 
 	touch_polls++;
+	/*
+	 * The chip pulls the interrupt line low when it has events. A read of one event costs about a
+	 * millisecond of this core -- the same core that serves the kernel's block I/O -- so empty
+	 * polls must not touch the bus. Every 64th poll reads anyway, in case the line is not wired
+	 * the way this assumes.
+	 */
+	if (touch_int_level() != 0 && (touch_polls & 63) != 0) {
+		return;
+	}
 
 	if (now - touch_last_report >= READ_SYSREG(CNTFRQ_EL0) * 30) {
 		touch_last_report = now;

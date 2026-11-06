@@ -32,7 +32,7 @@
 
 ---
 
-## 功能状态（2026-11-06）
+## 功能状态（2026-11-07）
 
 | 功能 | 状态 |
 | --- | --- |
@@ -43,10 +43,32 @@
 | launchd → backboardd → **SpringBoard 桌面** | ✅ 已通 |
 | 显示（UEFI 帧缓冲 0x9d400000，1080×2340） | ✅ 已通（CPU 光栅） |
 | adb/fastboot 日志回传（`logdump` 分区） | ✅ 已通 |
-| **触摸** | 🚧 开发中：驱动已进内核，I2C 供电/时序在调 |
+| **触摸** | ✅ **已可用**：点按、拖动即时响应（UEFI 供数据，内核只搬运） |
+| 上滑/返回手势 | 🚧 收尾中：需要按手指状态去重 |
 | GPU（Adreno 630） | ❌ 未开始（内核侧仍是 A660 基线驱动） |
 | Wi-Fi / 音频 / 相机 / 蓝牙 | ❌ 未开始 |
 | 充电 | ❌ 未验证（只掉电） |
+
+### 触摸是怎么做的（重要）
+
+这台手机的触摸**不能在内核里驱动**：I/O 轨是 TLMM 的 GPIO79，模拟供电是 PM8998 的 L28，
+而**内核里写一次 RPMh 开 L28 就会整机复位**（RSC 不属于 XNU）。所以：
+
+```
+loader（UEFI，core 0 常驻）                  内核（core 7）
+  GPIO79 上电                                  映射共享页（ml_io_map_unmappable）
+  RPMh 请求 pm8998_l28 3.3 V ≈ 共享页 ←写──── 轮询 seq/count
+  IER、复位、清 FIFO、开扫描                    redwood_touch_post() → /dev/redwood-touch → iOS
+  轮询事件、解析坐标、写共享页（每次 flush）
+```
+
+内核不碰任何触摸硬件，只读 `touch_shared_pa=` 指向的一页。两个必须踩对的点：
+
+1. **物理地址不是内核指针**：要用 `ml_io_map_unmappable()` 映射，否则第一次读就 data abort；
+2. **写完必须 flush cache**：内核是旁路缓存读的，不 flush 的话事件会攒着，直到别的内存活动
+   把 cache line 挤出去才突然涌进来（表现为"点一下要等好几秒"）。
+
+代码：`loader/touch.c`、`kernel/perseus_touch.c`，过程记录见 **[docs/touch-uefi.md](docs/touch-uefi.md)**。
 
 ---
 
@@ -80,8 +102,11 @@ fastboot boot boot-perseus-*.img
 | `xnu/patches/` | 对 HackiOS 内核基线的改动（定时器中断号、触摸驱动接入） |
 | `xnu/files/` | 新增源文件（`bsd/dev/perseus_fts.c`：ST FTS 触摸驱动，perseus 版） |
 | `xnuloader/patches/` | 对 HackiOS loader 的改动（第二张 ramdisk、cmdline 终止、看门狗、运行期日志） |
+| `loader/touch.c` | **UEFI 侧的触摸服务**：上电、RPMh 开 L28、复位、FTM5、写共享页 |
+| `kernel/perseus_touch.c` | **内核侧的读取端**：映射共享页、post 到 `/dev/redwood-touch` |
+| `uefi-probe/` | 独立的 UEFI 探测程序（上机诊断用，会停在屏幕上） |
 | `device/` | `perseus.conf`（设备 profile）与 `perseus.platform.c`（loader 的 SoC 描述） |
-| `docs/` | 调试记录（见下） |
+| `docs/` | 构建步骤、触摸路线与调试记录 |
 
 ## 怎么编
 
@@ -114,6 +139,12 @@ BUILD_LOADER=1 sh perseus-xnu/scripts/build.sh   # 内核 + loader.efi
 4. **看门狗 50 s → 15 s**，并且**周期写盘要带上内核日志环**，否则正常运行时 logdump 里只有 loader 的日志。
 5. **触摸 I/O 供电脚**：MIX 3 是 TLMM **GPIO 79**（`disp_vddio_vreg`），
    小米 8 是 GPIO 23 —— 直接抄小米 8 的条件，芯片根本没上电，I2C 全低。
+6. **触摸不能在 kernel 里开 L28**：写 RPMh 会整机复位（RSC 不是 XNU 的）；而
+   `PmicVreg` 协议在这个固件里无人使用，一调就卡死。只能在 UEFI 里做。
+7. **共享页的物理地址不是内核指针**：要 `ml_io_map_unmappable()` 映射，否则第一次读就
+   `Kernel data abort`（我们真撞过一次 panic）。
+8. **共享页写完必须 flush cache**：内核旁路缓存读，不 flush 时事件会攒在 loader 的 cache 里，
+   直到别的内存活动把 cache line 挤出去——表现就是"点一下要等几秒才动"。
 
 ---
 
