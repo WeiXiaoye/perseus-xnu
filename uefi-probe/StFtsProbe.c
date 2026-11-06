@@ -29,6 +29,7 @@
 #define FTM5_READ_EVENT   0x86
 #define FTM5_HW_REG       0xFA
 #define FTM5_FRAMEBUFFER  0xA6
+#define FTM5_SCAN_MODE    0xA0
 #define EVT_CONTROLLER_READY 0x03
 
 #define BB_DELAY_US     10
@@ -404,6 +405,181 @@ Ftm5Command (
   CopyMem (want + 2, Command, n);
   return Ftm5WaitBytes (want, 2 + n, 500, echo);
 }
+
+/* ---- RPMh: the one write the kernel cannot do (its RSC is not this one) ---------------------- */
+#define RSC_PHYS      0x179e0000UL
+#define CMD_DB_PHYS   0x85fe0000UL
+#define TCS(reg)      (RSC_PHYS + 0xd00 + (reg))
+#define TCS_IRQ_ENABLE          0x00
+#define TCS_IRQ_STATUS          0x04
+#define TCS_IRQ_CLEAR           0x08
+#define TCS_WAIT_FOR_COMPLETION 0x10
+#define TCS_CONTROL             0x14
+#define TCS_CONTROL_ENABLE      (1u << 16)
+#define TCS_CONTROL_TRIGGER     (1u << 24)
+#define TCS_STATUS              0x18
+#define TCS_CMD_ENABLE          0x1c
+#define TCS_CMD_MSGID(n)        (0x30 + 20 * (n))
+#define TCS_CMD_ADDR(n)         (0x34 + 20 * (n))
+#define TCS_CMD_DATA(n)         (0x38 + 20 * (n))
+#define MSGID_WRITE_4_BYTES     0x10008
+#define MSGID_RESPONSE          0x100
+#define VRM_VOLTAGE             0
+#define VRM_ENABLE              4
+#define VRM_MODE                8
+#define VRM_MODE_LDO_HPM        7
+
+typedef struct {
+  UINT16 Id, HeaderOffset, DataOffset, Count, Version, Reserved[3];
+} CMD_DB_SLAVE;
+
+typedef struct {
+  char     Id[8];
+  UINT32   Priority[2];
+  UINT32   Address;
+  UINT16   Length, Offset;
+} CMD_DB_ENTRY;
+
+STATIC UINT32 Rd32 (IN UINTN Address) { return *(volatile UINT32 *)Address; }
+STATIC VOID   Wr32 (IN UINTN Address, IN UINT32 Value) { *(volatile UINT32 *)Address = Value; }
+
+/* the RPMh address of a resource by its name in the command database (0 = none) */
+STATIC
+UINT32
+RpmhAddress (
+  IN CONST CHAR8 *Name
+  )
+{
+  CONST UINT8 *db = (CONST UINT8 *)(UINTN)CMD_DB_PHYS;
+  UINT32       s;
+
+  if (db[4] != 0xdb || db[5] != 0x30 || db[6] != 0x03 || db[7] != 0x0c) {
+    Print (L"RPMh: no command database at %08x (magic %02x %02x %02x %02x)\n", (UINT32)CMD_DB_PHYS, db[4], db[5], db[6], db[7]);
+    return 0;
+  }
+  for (s = 0; s < 8; s++) {
+    CONST CMD_DB_SLAVE *slave = (CONST CMD_DB_SLAVE *)(db + 8 + s * sizeof (CMD_DB_SLAVE));
+    CONST CMD_DB_ENTRY *entry;
+    UINT32              i;
+
+    if (slave->Id == 0 || slave->HeaderOffset >= 0x1f000 || slave->Count > 512) {
+      continue;
+    }
+    entry = (CONST CMD_DB_ENTRY *)(db + 8 + 8 * sizeof (CMD_DB_SLAVE) + 8 + slave->HeaderOffset);
+    for (i = 0; i < slave->Count; i++) {
+      if (CompareMem (entry[i].Id, Name, 8) == 0) {
+        return entry[i].Address;
+      }
+    }
+  }
+  return 0;
+}
+
+STATIC
+BOOLEAN
+RpmhWait (
+  IN UINT32 Register,
+  IN UINT32 Mask,
+  IN UINT32 Value
+  )
+{
+  UINT32 i;
+
+  for (i = 0; i < 2000; i++) {
+    if ((Rd32 (TCS (Register)) & Mask) == Value) {
+      return TRUE;
+    }
+    gBS->Stall (100);
+  }
+  Print (L"RPMh: timeout (register %x = %x)\n", Register, Rd32 (TCS (Register)));
+  return FALSE;
+}
+
+STATIC
+BOOLEAN
+RpmhL28 (
+  VOID
+  )
+{
+  UINT32 base = RpmhAddress ("ldoa28");
+  UINT32 address[3], data[3] = { 3300, 1, VRM_MODE_LDO_HPM };
+  UINT32 irq_enable, i, done;
+
+  Print (L"RPMh: ldoa28 at %08x, slot status %x control %x\n", base, Rd32 (TCS (TCS_STATUS)), Rd32 (TCS (TCS_CONTROL)));
+  if (base == 0) {
+    return FALSE;
+  }
+  address[0] = base + VRM_VOLTAGE;
+  address[1] = base + VRM_ENABLE;
+  address[2] = base + VRM_MODE;
+
+  for (i = 0; i < 2000 && Rd32 (TCS (TCS_STATUS)) == 0; i++) {
+    gBS->Stall (100);
+  }
+  irq_enable = Rd32 (TCS (TCS_IRQ_ENABLE));
+  Wr32 (TCS (TCS_CONTROL), Rd32 (TCS (TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
+  Wr32 (TCS (TCS_CONTROL), Rd32 (TCS (TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
+  Wr32 (TCS (TCS_IRQ_CLEAR), 1);
+  for (i = 0; i < 3; i++) {
+    Wr32 (TCS (TCS_CMD_MSGID (i)), MSGID_WRITE_4_BYTES | MSGID_RESPONSE);
+    Wr32 (TCS (TCS_CMD_ADDR (i)), address[i]);
+    Wr32 (TCS (TCS_CMD_DATA (i)), data[i]);
+  }
+  Wr32 (TCS (TCS_WAIT_FOR_COMPLETION), 7);
+  Wr32 (TCS (TCS_CMD_ENABLE), 7);
+  Wr32 (TCS (TCS_IRQ_ENABLE), irq_enable | 1);
+  Wr32 (TCS (TCS_CONTROL), TCS_CONTROL_ENABLE);
+  Wr32 (TCS (TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
+  done = RpmhWait (TCS_IRQ_STATUS, 1, 1);
+  for (i = 0; i < 3; i++) {
+    Print (L"RPMh: cmd %u: addr %08x data %u, status %x, response %x\n", i, Rd32 (TCS (TCS_CMD_ADDR (i))),
+           Rd32 (TCS (TCS_CMD_DATA (i))), Rd32 (TCS (TCS_CMD_ADDR (i) + 8)), Rd32 (TCS (TCS_CMD_ADDR (i) + 12)));
+  }
+  Wr32 (TCS (TCS_CONTROL), Rd32 (TCS (TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
+  Wr32 (TCS (TCS_CONTROL), Rd32 (TCS (TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
+  Wr32 (TCS (TCS_CMD_ENABLE), 0);
+  Wr32 (TCS (TCS_WAIT_FOR_COMPLETION), 0);
+  Wr32 (TCS (TCS_IRQ_CLEAR), 1);
+  Wr32 (TCS (TCS_IRQ_ENABLE), irq_enable);
+  Print (L"RPMh: L28 request %s\n", done ? L"completed" : L"did not complete");
+  return done != 0;
+}
+
+
+/* reset, wait for "controller ready", read the id and turn scanning on again */
+STATIC
+BOOLEAN
+ChipReInit (
+  VOID
+  )
+{
+  UINT8 ev[8], cmd[5], b[8];
+
+  Gpio (PIN_RESET, GPIO_OUTPUT, GPIO_PULL_UP, GPIO_LOW_VALUE);
+  gBS->Stall (10000);
+  Gpio (PIN_RESET, GPIO_OUTPUT, GPIO_PULL_UP, GPIO_HIGH_VALUE);
+  gBS->Stall (50000);
+
+  if (!Ftm5Wait (EVT_CONTROLLER_READY, 2000, ev)) {
+    Print (L"re-init: no controller ready\n");
+    return FALSE;
+  }
+  Print (L"re-init: controller ready %02x %02x\n", ev[0], ev[1]);
+
+  cmd[0] = FTM5_HW_REG; cmd[1] = 0x20; cmd[2] = 0x00; cmd[3] = 0x00; cmd[4] = 0x00;
+  if (Ftm5Read (cmd, 5, b, 8)) {
+    Print (L"re-init: chip id %02x %02x\n", b[0], b[1]);
+  }
+
+  cmd[0] = FTM5_SCAN_MODE; cmd[1] = 0x00; cmd[2] = 0x01;
+  if (Ftm5Command (cmd, 3)) {
+    Print (L"re-init: scanning on\n");
+    return TRUE;
+  }
+  Print (L"re-init: scan command not confirmed\n");
+  return FALSE;
+}
+
 EFI_STATUS
 EFIAPI
 UefiMain (
@@ -487,6 +663,7 @@ UefiMain (
   {
     UINT8  scan[3] = { 0xA0, 0x00, 0x01 };
     UINT32 n, printed = 0;
+    BOOLEAN tried_ldo = FALSE;
 
     if (Ftm5Command (scan, 3)) {
       Print (L"FTM5: scanning on (touch the panel now)\n");
@@ -494,6 +671,14 @@ UefiMain (
       Print (L"FTM5: scanning not confirmed, watching anyway\n");
     }
     for (n = 0; n < 1500 && printed < 40; n++) {
+      if (n == 250 && !tried_ldo) {
+        tried_ldo = TRUE;
+        Print (L"no events in 5 s: requesting pm8998_l28 over RPMh (the kernel cannot)\n");
+        if (RpmhL28 ()) {
+          ChipReInit ();
+        }
+        Print (L"watching again\n");
+      }
       UINT8  cmd[1] = { FTM5_READ_EVENT };
       UINT8  ev[8];
       UINT8  raw[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
