@@ -565,6 +565,50 @@ Ftm5Flush (
   return TRUE;
 }
 
+
+/* 0xFA + a 4-byte address + the value: a hardware register write */
+STATIC
+BOOLEAN
+Ftm5WriteHwReg (
+  IN UINT32 Address,
+  IN UINT8  Value
+  )
+{
+  UINT8 cmd[6];
+
+  cmd[0] = FTM5_HW_REG;
+  cmd[1] = (UINT8)(Address >> 24);
+  cmd[2] = (UINT8)(Address >> 16);
+  cmd[3] = (UINT8)(Address >> 8);
+  cmd[4] = (UINT8)Address;
+  cmd[5] = Value;
+  if (EFI_ERROR (BbWrite (I2C_ADDR_ST, cmd, 6))) {
+    BbRecover ();
+    return FALSE;
+  }
+  gBS->Stall (5000);
+  return TRUE;
+}
+
+/* 0xFA + address, then a read: the same register back */
+STATIC
+BOOLEAN
+Ftm5ReadHwReg (
+  IN  UINT32 Address,
+  OUT UINT8  *Buffer,
+  IN  UINT32 Length
+  )
+{
+  UINT8 cmd[5];
+
+  cmd[0] = FTM5_HW_REG;
+  cmd[1] = (UINT8)(Address >> 24);
+  cmd[2] = (UINT8)(Address >> 16);
+  cmd[3] = (UINT8)(Address >> 8);
+  cmd[4] = (UINT8)Address;
+  return Ftm5Read (cmd, 5, Buffer, Length);
+}
+
 /* reset, wait for "controller ready", read the id and turn scanning on again */
 STATIC
 BOOLEAN
@@ -646,10 +690,27 @@ UefiMain (
   {
     UINT8 id[2] = { 0, 0 };
     if (BbReadRegister (I2C_ADDR_ST, REG_CHIP_ID, id, 2)) {
-      Print (L"0x49 answers: %02x %02x\n", id[0], id[1]);
+      Print (L"0x49 answers (ST FTS): %02x %02x\n", id[0], id[1]);
       found = TRUE;
     } else {
       Print (L"0x49 does not answer\n");
+    }
+    BbRecover ();
+    /* the device tree puts an Atmel mXT640U at 0x4a on the same bus: which panel is populated? */
+    id[0] = id[1] = 0;
+    if (BbReadRegister (0x4A, 0x00, id, 2)) {
+      Print (L"0x4a answers (Atmel mXT640U): %02x %02x\n", id[0], id[1]);
+      found = TRUE;
+    } else {
+      Print (L"0x4a does not answer\n");
+    }
+    BbRecover ();
+    id[0] = id[1] = 0;
+    if (BbReadRegister (0x38, 0x00, id, 2)) {
+      Print (L"0x38 answers (FocalTech): %02x %02x\n", id[0], id[1]);
+      found = TRUE;
+    } else {
+      Print (L"0x38 does not answer\n");
     }
     BbRecover ();
   }
@@ -681,6 +742,16 @@ UefiMain (
     }
   }
 
+  /* 5b. the chip's own verdict: a CRC error in flash stops it from scanning */
+  {
+    UINT8 crc = 0, sys = 0;
+    if (Ftm5ReadHwReg (0x20000078, &crc, 1)) {
+      Print (L"CRC status = %02x (0 = ok, bits 0-1 are the errors)\n", crc);
+    }
+    if (Ftm5ReadHwReg (0x20000024, &sys, 1)) {
+      Print (L"system control (0x20000024) = %02x\n", sys);
+    }
+  }
   /* 6. scanning on, then the events: touch the panel and watch them arrive */
   {
     UINT8  scan[3] = { 0xA0, 0x00, 0x01 };
@@ -698,6 +769,11 @@ UefiMain (
         tried_ldo = TRUE;
         Print (L"no events in 5 s: requesting pm8998_l28 over RPMh (the kernel cannot)\n");
         if (RpmhL28 ()) {
+          UINT8 ier = 0;
+          Ftm5WriteHwReg (0x20000029, 0x41);
+          if (Ftm5ReadHwReg (0x20000029, &ier, 1)) {
+            Print (L"IER = %02x (0x41 = interrupts enabled)\n", ier);
+          }
           ChipReInit ();
         }
         Print (L"watching again\n");
