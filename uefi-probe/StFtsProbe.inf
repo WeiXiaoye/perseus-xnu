@@ -1,0 +1,25 @@
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = StFtsProbe
+  FILE_GUID                      = 5e1f7a10-3c2d-4b8a-9d11-7a2f0c6e4b21
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  StFtsProbe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  sdm845Pkg/sdm845Pkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  BaseMemoryLib
+  PcdLib
+
+[Protocols]
+  gQcomI2cProtocolGuid
+  gQcomTlmmProtocolGuid
+  gQcomPmicVregProtocolGuid
