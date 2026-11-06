@@ -546,6 +546,25 @@ RpmhL28 (
 }
 
 
+/* {0xA4, 0x00, 0x01}: system command, special, "flush the FIFO" */
+STATIC
+BOOLEAN
+Ftm5Flush (
+  VOID
+  )
+{
+  UINT8 cmd[3] = { 0xA4, 0x00, 0x01 };
+
+  if (EFI_ERROR (BbWrite (I2C_ADDR_ST, cmd, 3))) {
+    BbRecover ();
+    Print (L"flush: command not acknowledged\n");
+    return FALSE;
+  }
+  gBS->Stall (10000);
+  Print (L"flush: FIFO cleared\n");
+  return TRUE;
+}
+
 /* reset, wait for "controller ready", read the id and turn scanning on again */
 STATIC
 BOOLEAN
@@ -571,6 +590,7 @@ ChipReInit (
     Print (L"re-init: chip id %02x %02x\n", b[0], b[1]);
   }
 
+  Ftm5Flush ();
   cmd[0] = FTM5_SCAN_MODE; cmd[1] = 0x00; cmd[2] = 0x01;
   if (Ftm5Command (cmd, 3)) {
     Print (L"re-init: scanning on\n");
@@ -579,6 +599,8 @@ ChipReInit (
   Print (L"re-init: scan command not confirmed\n");
   return FALSE;
 }
+
+
 
 EFI_STATUS
 EFIAPI
@@ -665,6 +687,7 @@ UefiMain (
     UINT32 n, printed = 0;
     BOOLEAN tried_ldo = FALSE;
 
+    Ftm5Flush ();
     if (Ftm5Command (scan, 3)) {
       Print (L"FTM5: scanning on (touch the panel now)\n");
     } else {
