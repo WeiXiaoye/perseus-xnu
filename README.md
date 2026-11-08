@@ -6,8 +6,8 @@
 [HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) 的路线：Apple 开源的 XNU 内核 +
 自研 UEFI 引导链，跑**未修改的 iOS 16.5 用户态**（launchd → backboardd → SpringBoard）。
 
-当前状态（2026-11-06）：**已经在这台 MIX 3 上进到 iOS 16.5 桌面（SpringBoard）**。
-触控、GPU 仍在开发中。
+当前状态（2026-11-09）：**已经在这台 MIX 3 上进到 iOS 16.5 桌面（SpringBoard）**，
+**触摸可用**（点按、拖动、滑动、返回手势）；GPU 的上电与渲染已通，但显示链路仍在开发中。
 
 > 本仓库只包含**补丁、新驱动和脚本**，不包含任何 Apple 二进制文件，也不包含内核构建产物。
 > 内核需要在你自己的 Linux 机器上编译，iOS 系统卷需要你自己从 Apple 的 IPSW 里提取。
@@ -45,9 +45,13 @@
 | adb/fastboot 日志回传（`logdump` 分区） | ✅ 已通 |
 | **触摸** | ✅ **已可用**：点按、拖动、上滑、返回都能用（UEFI 供数据，内核只搬运） |
 | 上滑 / 返回手势 | ✅ 已可用（界面掉帧来自 GPU 缺失，不是触摸） |
-| GPU（Adreno 630） | ❌ 未开始（内核侧仍是 A660 基线驱动） |
+| GPU（Adreno 630） | 🚧 上电与渲染已通（ZAP 认证、非安全模式、Mesa/freedreno 出图、CoreAnimation 提交），**显示到面板仍未成** |
 | Wi-Fi / 音频 / 相机 / 蓝牙 | ❌ 未开始 |
 | 充电 | ❌ 未验证（只掉电） |
+
+> **触摸只有一个开关**：loader 驱动芯片 + 内核读共享页（`touch_shared_pa=`），**不要加 `fts=1`**。
+> `fts=1` 会启动内核内的 FTS 驱动，和 loader 抢同一颗芯片，两边都拿不到事件。详见
+> **[docs/status-2026-11-09.md](docs/status-2026-11-09.md)**。
 
 ### 触摸是怎么做的（重要）
 
