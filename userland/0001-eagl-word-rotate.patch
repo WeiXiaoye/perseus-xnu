@@ -1,0 +1,32 @@
+The per-frame IOSurface reorder, as one 32-bit rotation a pixel.
+
+The frame log showed ~35 ms a frame "for the IOSurfaces": surface_to_texture() moved each pixel's
+four bytes one at a time (A,B,G,R in memory into B,G,R,A for the texture), 2.5 million times a
+frame. The four bytes are one word rotated right by eight bits.
+
+--- a/src/eagl.c
++++ b/src/eagl.c
+@@ -706,12 +706,17 @@ surface_to_texture(struct eagl *e, struct image *image)
+ 			if (!alpha_first) {
+ 				memcpy(to, from, used < row ? used : row);
+ 				continue;
+ 			}
+ 			/* opacity, blue, green, red in memory: into the order OpenGL ES was told */
+-			for (size_t at = 0; at + 4 <= used && at + 4 <= row; at += 4) {
+-				to[at] = from[at + (image->format == GL_BGRA ? 1 : 3)];
+-				to[at + 1] = from[at + 2];
+-				to[at + 2] = from[at + (image->format == GL_BGRA ? 3 : 1)];
+-				to[at + 3] = from[at];
+-			}
++			size_t limit = used < row ? used : row;
++
++			for (size_t at = 0; at + 4 <= limit; at += 4) {
++				uint32_t word;
++
++				memcpy(&word, from + at, sizeof(word));
++				word = (word >> 8) | (word << 24);      /* A,B,G,R -> B,G,R,A */
++				memcpy(to + at, &word, sizeof(word));
++			}
+ 		}
+ 		base = flipped;
+ 	}
