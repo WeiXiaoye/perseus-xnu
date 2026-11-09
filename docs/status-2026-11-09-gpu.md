@@ -82,13 +82,41 @@ A is the first thing to try: it is one condition at the start of the existing co
 make the picture worse than it is now, and it says at once whether the panel's scan can be followed
 at all -- which B and C both depend on too.
 
+## What the frame log measured (2026-11-10, 00:20)
+
+`redwood-gl: frame N: ... <b> before it for the IOSurfaces (SPLIT_ATTACH: <c> checking, <d> uploading)`
+splits the per-frame cost into the two halves that are not the GPU's:
+
+| Build | checking | uploading |
+| --- | --- | --- |
+| per-byte reorder | 20.2 ms | 14.2 ms |
+| word rotate + full-surface hash | 18.8 ms | 32.9 ms |
+| + sampled hash, 64-byte steps | 13.1 ms | 14.6 ms |
+| + sampled hash, 4 KB steps | 9.6 ms | 14.6 ms |
+| change check removed entirely | (gone) | 14.6 ms |
+
+Two things were learned by measuring rather than reasoning:
+
+1. **A 64-byte sampling step saves nothing**: 64 bytes is exactly one cache line, so every line is
+   still fetched. It has to step a page at a time to be worth anything, and even then the cost only
+   fell from 13.1 to 9.6 ms -- which says the access to the surface's memory is itself slow, most
+   likely a mapping without caching. That is the next thing to fix (`kIOMapDefaultCache` in the
+   mapping `MiniIOSurface` hands the client, with the cache maintenance that then becomes needed).
+2. **Deciding costs more than doing**: the change check exists to skip an upload that did not
+   change; it costs 10 ms to save 14 ms on the frames that did not, and most frames change. Removing
+   it is a net win and is what the current build does.
+
+`glTexImage2D` per frame also re-makes the texture; `glTexSubImage2D` into a texture made once is
+the cheaper shape and is in place.
+
 ## What is left
 
-* **Frame rate**: measure again after the reorder fix; if the upload is still the cost, the next step
-  is to swizzle four pixels at a time (NEON `vrev32`), or to hand the pixels to the GPU untransformed
-  and let the sampler read them wrapped.
-* **Frame rate**: measure again after the reorder fix; if the upload is still the cost, the next step
-  is to swizzle four pixels at a time (NEON `vrev32`), or to hand the pixels to the GPU untransformed
-  and let the sampler read them wrapped.
+* **Frame rate**: the upload's 14 ms is Mesa copying 10 MB through a mapping that reads slowly. The
+  two ways to fix it are a cacheable mapping (with cache maintenance on the producer side) or a
+  zero-copy path (the surface's pages registered as a GPU buffer, no CPU copy at all).
 * **Fences**: submissions are reported to the CP and the ring is consumed; whether every fence comes
   back is not yet measured over a long run.
+* **Late logs**: the logdump partition carries only the first ~48 s of a boot. The loader hands out
+  a *live* log (`fastboot oem log` then `fastboot get_staged`), which is how the numbers above will
+  have to be taken from here on.
+* **Wi-Fi** (next): WCN3990 is not started at all.
