@@ -57,14 +57,36 @@ at 15-20 frames a second. That time was the per-pixel reorder in the userland's
 the loop moved the four bytes one at a time, 2.5 million times a frame. It is one 32-bit rotation of
 the pixel; see `userland/0001-eagl-word-rotate.patch`.
 
+## The tearing, and the ways out
+
+The frame is copied into the framebuffer with nothing tying the copy to the panel's scan. A copy
+that begins in the middle of a frame is therefore seen half-old and half-new: the top of the screen
+is one picture and the bottom is the one before it.
+
+The Mi 8's own answer is `fb_flip=1 fb_telock=1`: the swap rides the panel's tearing-effect pulse.
+That pulse is available here (the driver reads it at `0x0ae70000` and logs "the vsync follows the
+tearing-effect pulse" when asked), but `fb_telock` only applies to the native flip path, and that
+path cannot work on this phone -- the panel keeps reading the boot loader's buffer at `0x9d400000`.
+So the copy has to be timed by hand. This phone does expose what is needed: the display controller's
+line counter, `INTF_LINE_COUNT`, which the driver already reads when it reports the scan.
+
+Three ways, in order of what they cost to try:
+
+| | How | What it costs |
+| --- | --- | --- |
+| **A. copy during the vertical blank** | wait for the line counter to wrap (the frame's end) and then copy | simple, and the whole copy must fit in the blanking interval: 10 MB of frame in ~16 ms needs ~600 MB/s, which the copy may just manage; otherwise the first lines of the next frame get the tail |
+| **B. chase the scan** | copy from the line the panel is reading *now*, so that every line is written before the panel reaches it, a frame's worth of lag behind | no extra delay in what is shown, but the writer has to keep up with the scanner line for line, and the check is the line counter against the row being written |
+| **C. queue of frames** | three framebuffers, present the next one, drop the oldest when the producer outruns the panel | smoothest under load, most memory (2 x 10 MB) and a second thing that can go wrong |
+
+A is the first thing to try: it is one condition at the start of the existing copy loop, it cannot
+make the picture worse than it is now, and it says at once whether the panel's scan can be followed
+at all -- which B and C both depend on too.
+
 ## What is left
 
-* **Tearing**: the frame is copied into the framebuffer with nothing tying the copy to the panel's
-  scan, so a copy that starts mid-frame is seen half-old and half-new. The Mi 8 driver's answer is
-  `fb_flip=1 fb_telock=1`, which rides the panel's tearing-effect pulse; that path needs the display
-  controller's flip, which this phone's panel does not perform for us. The alternatives are to time
-  the copy against the panel's line counter (the driver already reads `INTF_LINE_COUNT`) or to accept
-  a bounded queue of two frames.
+* **Frame rate**: measure again after the reorder fix; if the upload is still the cost, the next step
+  is to swizzle four pixels at a time (NEON `vrev32`), or to hand the pixels to the GPU untransformed
+  and let the sampler read them wrapped.
 * **Frame rate**: measure again after the reorder fix; if the upload is still the cost, the next step
   is to swizzle four pixels at a time (NEON `vrev32`), or to hand the pixels to the GPU untransformed
   and let the sampler read them wrapped.
